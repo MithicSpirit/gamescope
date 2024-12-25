@@ -640,6 +640,10 @@ namespace gamescope
         void Wayland_XXColorManager_SupportedPrimariesNamed( xx_color_manager_v3 *pXXColorManager, uint32_t uPrimaries );
         static const xx_color_manager_v3_listener s_XXColorManagerListener;
 
+        void Wayland_DataSource_Send( struct wl_data_source *pSource, const char *pMime, int nFd );
+        void Wayland_DataSource_Cancelled( struct wl_data_source *pSource );
+        static const wl_data_source_listener s_DataSourceListener;
+
         CWaylandInputThread m_InputThread;
 
         CWaylandConnector m_Connector;
@@ -664,6 +668,10 @@ namespace gamescope
         zwp_relative_pointer_manager_v1 *m_pRelativePointerManager = nullptr;
         wp_fractional_scale_manager_v1 *m_pFractionalScaleManager = nullptr;
         xdg_toplevel_icon_manager_v1 *m_pToplevelIconManager = nullptr;
+
+        wl_data_device_manager *m_pDataDeviceManager = nullptr;
+        wl_data_device *m_pDataDevice = nullptr;
+        std::shared_ptr<std::string> m_pClipboard = nullptr;
 
         struct 
         {
@@ -692,6 +700,7 @@ namespace gamescope
 
         uint32_t m_uPointerEnterSerial = 0;
         bool m_bMouseEntered = false;
+        uint32_t m_uKeyboardEnterSerial = 0;
         bool m_bKeyboardEntered = false;
 
         std::shared_ptr<INestedHints::CursorInfo> m_pCursorInfo;
@@ -751,6 +760,11 @@ namespace gamescope
         .supported_feature         = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_XXColorManager_SupportedFeature ),
         .supported_tf_named        = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_XXColorManager_SupportedTFNamed ),
         .supported_primaries_named = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_XXColorManager_SupportedPrimariesNamed ),
+    };
+    const wl_data_source_listener CWaylandBackend::s_DataSourceListener =
+    {
+        .send      = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_DataSource_Send ),
+        .cancelled = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_DataSource_Cancelled ),
     };
 
     //////////////////
@@ -2005,7 +2019,21 @@ namespace gamescope
     }
     void CWaylandBackend::SetSelection( std::shared_ptr<std::string> szContents, GamescopeSelection eSelection )
     {
-        // Do nothing
+        if ( !m_pDataDevice )
+            m_pDataDevice = wl_data_device_manager_get_data_device( m_pDataDeviceManager, m_pSeat );
+
+        if ( eSelection == GAMESCOPE_SELECTION_CLIPBOARD && m_pDataDevice )
+        {
+            m_pClipboard = szContents;
+            wl_data_source *source = wl_data_device_manager_create_data_source( m_pDataDeviceManager );
+            wl_data_source_add_listener( source, &s_DataSourceListener, this );
+            wl_data_source_offer( source, "text/plain" );
+            wl_data_device_set_selection( m_pDataDevice, source, m_uKeyboardEnterSerial );
+        }
+        else if ( eSelection == GAMESCOPE_SELECTION_PRIMARY )
+        {
+            // Do nothing
+        }
     }
 
     std::shared_ptr<INestedHints::CursorInfo> CWaylandBackend::GetHostCursor()
@@ -2183,6 +2211,10 @@ namespace gamescope
         {
             m_pToplevelIconManager = (xdg_toplevel_icon_manager_v1 *)wl_registry_bind( pRegistry, uName, &xdg_toplevel_icon_manager_v1_interface, 1u );
         }
+        else if ( !strcmp( pInterface, wl_data_device_manager_interface.name ) )
+        {
+            m_pDataDeviceManager = (wl_data_device_manager *)wl_registry_bind( pRegistry, uName, &wl_data_device_manager_interface, 3u );
+        }
     }
 
     void CWaylandBackend::Wayland_Modifier( zwp_linux_dmabuf_v1 *pDmabuf, uint32_t uFormat, uint32_t uModifierHi, uint32_t uModifierLo )
@@ -2288,6 +2320,7 @@ namespace gamescope
         if ( !IsSurfacePlane( pSurface ) )
             return;
 
+        m_uKeyboardEnterSerial = uSerial;
         m_bKeyboardEntered = true;
 
         UpdateCursor();
@@ -2319,6 +2352,20 @@ namespace gamescope
     void CWaylandBackend::Wayland_XXColorManager_SupportedPrimariesNamed( xx_color_manager_v3 *pXXColorManager, uint32_t uPrimaries )
     {
         m_XXColorManagerFeatures.ePrimaries.push_back( static_cast<xx_color_manager_v3_primaries>( uPrimaries ) );
+    }
+
+    // Data Source
+
+    void CWaylandBackend::Wayland_DataSource_Send( struct wl_data_source *pSource, const char *pMime, int nFd )
+    {
+        ssize_t len = m_pClipboard->length();
+        if ( write( nFd, m_pClipboard->c_str(), len ) != len )
+            xdg_log.infof( "Failed to write all %zd bytes to clipboard", len );
+        close( nFd );
+    }
+    void CWaylandBackend::Wayland_DataSource_Cancelled( struct wl_data_source *pSource )
+    {
+        wl_data_source_destroy( pSource );
     }
 
     ///////////////////////
